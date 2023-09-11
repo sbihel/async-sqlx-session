@@ -1,5 +1,8 @@
-use async_session::{async_trait, chrono::Utc, log, serde_json, Result, Session, SessionStore};
+use async_session::{async_trait, Session, SessionStore};
+use chrono::Utc;
 use sqlx::{pool::PoolConnection, Executor, PgPool, Postgres};
+
+use crate::SessionStoreError;
 
 /// sqlx postgres session store for async-sessions
 ///
@@ -268,8 +271,9 @@ impl PostgresSessionStore {
 
 #[async_trait]
 impl SessionStore for PostgresSessionStore {
-    async fn load_session(&self, cookie_value: String) -> Result<Option<Session>> {
-        let id = Session::id_from_cookie_value(&cookie_value)?;
+    type Error = SessionStoreError;
+    async fn load_session(&self, cookie_value: &str) -> Result<Option<Session>, Self::Error> {
+        let id = Session::id_from_cookie_value(cookie_value)?;
         let mut connection = self.connection().await?;
 
         let result: Option<(String,)> = sqlx::query_as(&self.substitute_table_name(
@@ -285,7 +289,7 @@ impl SessionStore for PostgresSessionStore {
             .transpose()?)
     }
 
-    async fn store_session(&self, session: Session) -> Result<Option<String>> {
+    async fn store_session(&self, session: &mut Session) -> Result<Option<String>, Self::Error> {
         let id = session.id();
         let string = serde_json::to_string(&session)?;
         let mut connection = self.connection().await?;
@@ -299,27 +303,27 @@ impl SessionStore for PostgresSessionStore {
               session = EXCLUDED.session
             "#,
         ))
-        .bind(&id)
+        .bind(id)
         .bind(&string)
-        .bind(&session.expiry())
+        .bind(session.expiry())
         .execute(&mut *connection)
         .await?;
 
-        Ok(session.into_cookie_value())
+        Ok(session.clone().into_cookie_value())
     }
 
-    async fn destroy_session(&self, session: Session) -> Result {
+    async fn destroy_session(&self, session: &mut Session) -> Result<(), Self::Error> {
         let id = session.id();
         let mut connection = self.connection().await?;
         sqlx::query(&self.substitute_table_name("DELETE FROM %%TABLE_NAME%% WHERE id = $1"))
-            .bind(&id)
+            .bind(id)
             .execute(&mut *connection)
             .await?;
 
         Ok(())
     }
 
-    async fn clear_store(&self) -> Result {
+    async fn clear_store(&self) -> Result<(), Self::Error> {
         let mut connection = self.connection().await?;
         sqlx::query(&self.substitute_table_name("TRUNCATE %%TABLE_NAME%%"))
             .execute(&mut *connection)
@@ -332,7 +336,8 @@ impl SessionStore for PostgresSessionStore {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use async_session::chrono::DateTime;
+    use anyhow::Result;
+    use chrono::DateTime;
     use std::time::Duration;
 
     async fn test_store() -> PostgresSessionStore {
@@ -351,12 +356,12 @@ mod tests {
     }
 
     #[async_std::test]
-    async fn creating_a_new_session_with_no_expiry() -> Result {
+    async fn creating_a_new_session_with_no_expiry() -> Result<()> {
         let store = test_store().await;
         let mut session = Session::new();
         session.insert("key", "value")?;
         let cloned = session.clone();
-        let cookie_value = store.store_session(session).await?.unwrap();
+        let cookie_value = store.store_session(&mut session).await?.unwrap();
 
         let (id, expires, serialized, count): (String, Option<DateTime<Utc>>, String, i64) =
             sqlx::query_as("select id, expires, session, (select count(*) from async_sessions) from async_sessions")
@@ -371,7 +376,7 @@ mod tests {
         assert_eq!(cloned.id(), deserialized_session.id());
         assert_eq!("value", &deserialized_session.get::<String>("key").unwrap());
 
-        let loaded_session = store.load_session(cookie_value).await?.unwrap();
+        let loaded_session = store.load_session(&cookie_value).await?.unwrap();
         assert_eq!(cloned.id(), loaded_session.id());
         assert_eq!("value", &loaded_session.get::<String>("key").unwrap());
 
@@ -380,19 +385,19 @@ mod tests {
     }
 
     #[async_std::test]
-    async fn updating_a_session() -> Result {
+    async fn updating_a_session() -> Result<()> {
         let store = test_store().await;
         let mut session = Session::new();
         let original_id = session.id().to_owned();
 
         session.insert("key", "value")?;
-        let cookie_value = store.store_session(session).await?.unwrap();
+        let cookie_value = store.store_session(&mut session).await?.unwrap();
 
-        let mut session = store.load_session(cookie_value.clone()).await?.unwrap();
+        let mut session = store.load_session(&cookie_value.clone()).await?.unwrap();
         session.insert("key", "other value")?;
-        assert_eq!(None, store.store_session(session).await?);
+        assert_eq!(None, store.store_session(&mut session).await?);
 
-        let session = store.load_session(cookie_value.clone()).await?.unwrap();
+        let session = store.load_session(&cookie_value.clone()).await?.unwrap();
         assert_eq!(session.get::<String>("key").unwrap(), "other value");
 
         let (id, count): (String, i64) =
@@ -407,21 +412,21 @@ mod tests {
     }
 
     #[async_std::test]
-    async fn updating_a_session_extending_expiry() -> Result {
+    async fn updating_a_session_extending_expiry() -> Result<()> {
         let store = test_store().await;
         let mut session = Session::new();
         session.expire_in(Duration::from_secs(10));
         let original_id = session.id().to_owned();
         let original_expires = session.expiry().unwrap().clone();
-        let cookie_value = store.store_session(session).await?.unwrap();
+        let cookie_value = store.store_session(&mut session).await?.unwrap();
 
-        let mut session = store.load_session(cookie_value.clone()).await?.unwrap();
+        let mut session = store.load_session(&cookie_value.clone()).await?.unwrap();
         assert_eq!(session.expiry().unwrap(), &original_expires);
         session.expire_in(Duration::from_secs(20));
         let new_expires = session.expiry().unwrap().clone();
-        store.store_session(session).await?;
+        store.store_session(&mut session).await?;
 
-        let session = store.load_session(cookie_value.clone()).await?.unwrap();
+        let session = store.load_session(&cookie_value.clone()).await?.unwrap();
         assert_eq!(session.expiry().unwrap(), &new_expires);
 
         let (id, expires, count): (String, DateTime<Utc>, i64) = sqlx::query_as(
@@ -431,21 +436,21 @@ mod tests {
         .await?;
 
         assert_eq!(1, count);
-        assert_eq!(expires.timestamp_millis(), new_expires.timestamp_millis());
+        assert_eq!(expires.timestamp(), new_expires.unix_timestamp());
         assert_eq!(original_id, id);
 
         Ok(())
     }
 
     #[async_std::test]
-    async fn creating_a_new_session_with_expiry() -> Result {
+    async fn creating_a_new_session_with_expiry() -> Result<()> {
         let store = test_store().await;
         let mut session = Session::new();
         session.expire_in(Duration::from_secs(1));
         session.insert("key", "value")?;
         let cloned = session.clone();
 
-        let cookie_value = store.store_session(session).await?.unwrap();
+        let cookie_value = store.store_session(&mut session).await?.unwrap();
 
         let (id, expires, serialized, count): (String, Option<DateTime<Utc>>, String, i64) =
             sqlx::query_as("select id, expires, session, (select count(*) from async_sessions) from async_sessions")
@@ -460,42 +465,42 @@ mod tests {
         assert_eq!(cloned.id(), deserialized_session.id());
         assert_eq!("value", &deserialized_session.get::<String>("key").unwrap());
 
-        let loaded_session = store.load_session(cookie_value.clone()).await?.unwrap();
+        let loaded_session = store.load_session(&cookie_value.clone()).await?.unwrap();
         assert_eq!(cloned.id(), loaded_session.id());
         assert_eq!("value", &loaded_session.get::<String>("key").unwrap());
 
         assert!(!loaded_session.is_expired());
 
         async_std::task::sleep(Duration::from_secs(1)).await;
-        assert_eq!(None, store.load_session(cookie_value).await?);
+        assert_eq!(None, store.load_session(&cookie_value).await?);
 
         Ok(())
     }
 
     #[async_std::test]
-    async fn destroying_a_single_session() -> Result {
+    async fn destroying_a_single_session() -> Result<()> {
         let store = test_store().await;
         for _ in 0..3i8 {
-            store.store_session(Session::new()).await?;
+            store.store_session(&mut Session::new()).await?;
         }
 
-        let cookie = store.store_session(Session::new()).await?.unwrap();
+        let cookie = store.store_session(&mut Session::new()).await?.unwrap();
         assert_eq!(4, store.count().await?);
-        let session = store.load_session(cookie.clone()).await?.unwrap();
-        store.destroy_session(session.clone()).await.unwrap();
-        assert_eq!(None, store.load_session(cookie).await?);
+        let mut session = store.load_session(&cookie.clone()).await?.unwrap();
+        store.destroy_session(&mut session.clone()).await.unwrap();
+        assert_eq!(None, store.load_session(&cookie).await?);
         assert_eq!(3, store.count().await?);
 
         // // attempting to destroy the session again is not an error
-        assert!(store.destroy_session(session).await.is_ok());
+        assert!(store.destroy_session(&mut session).await.is_ok());
         Ok(())
     }
 
     #[async_std::test]
-    async fn clearing_the_whole_store() -> Result {
+    async fn clearing_the_whole_store() -> Result<()> {
         let store = test_store().await;
         for _ in 0..3i8 {
-            store.store_session(Session::new()).await?;
+            store.store_session(&mut Session::new()).await?;
         }
 
         assert_eq!(3, store.count().await?);

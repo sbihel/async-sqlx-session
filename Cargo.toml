@@ -15,7 +15,7 @@ categories = ["web-programming::http-server", "web-programming", "database"]
 features = ["pg", "sqlite", "mysql", "async_std"]
 
 [features]
-default = ["native-tls"]
+default = ["native-tls", "mysql", "pg", "sqlite"]
 sqlite = ["sqlx/sqlite"]
 pg = ["sqlx/postgres", "sqlx/json"]
 native-tls = ["sqlx/runtime-async-std-native-tls"]
@@ -26,11 +26,17 @@ mysql = ["sqlx/mysql", "sqlx/json"]
 [dependencies]
 # async-session = "3.0.0"
 async-session = { git = "https://github.com/http-rs/async-session", rev = "35cb0998f91b81b133c3314414adae4019a62741", default-features = false }
-sqlx = { version = "0.7.1", features = ["chrono"] }
+sqlx = { version = "0.7.1", features = ["time", "chrono"] }
 async-std = { version = "1.12.0", optional = true }
+chrono = "0.4.30"
+log = "0.4.20"
+serde_json = "1.0.106"
+thiserror = "1.0.48"
+base64 = "0.21.4"
 
 [dev-dependencies]
 async-std = { version = "1.12.0", features = ["attributes"] }
+anyhow = "1.0.75"
 
 [dev-dependencies.sqlx]
 version = "0.7.1"

@@ -54,3 +54,17 @@ pub use pg::PostgresSessionStore;
 mod mysql;
 #[cfg(feature = "mysql")]
 pub use mysql::MySqlSessionStore;
+
+///
+#[derive(thiserror::Error, Debug)]
+pub enum SessionStoreError {
+    ///
+    #[error(transparent)]
+    Sqlx(#[from] sqlx::Error),
+    ///
+    #[error(transparent)]
+    Serde(#[from] serde_json::Error),
+    ///
+    #[error(transparent)]
+    Base64(#[from] base64::DecodeError),
+}
